@@ -470,7 +470,7 @@ if "magni_mult" not in st.session_state:
 if "beta" not in st.session_state:
     st.session_state["beta"] = 0.3
 if "gamma" not in st.session_state:
-    st.session_state["gamma"] = 0.005
+    st.session_state["gamma"] = 0.0
 if "show_all" not in st.session_state:
     st.session_state.show_all = True
 if "lati" not in st.session_state:
@@ -500,7 +500,7 @@ if st.session_state.show_all:
         dist = st.number_input("Range", value=st.session_state["dist"])
 
     # for creating the conv matrix
-    mat1, mat2, mat3, mat4 = st.columns(4)
+    mat1, mat2, mat3 = st.columns(3)
     with mat1:
         spreadability = st.number_input(
             "maximum spread range", value=st.session_state["spread"]
@@ -513,13 +513,6 @@ if st.session_state.show_all:
         beta = st.number_input(
             "Rate of transmission",
             value=st.session_state["beta"],
-            min_value=0.0,
-            max_value=1.0,
-        )
-    with mat4:
-        gamma = st.number_input(
-            "Rate of removal",
-            value=st.session_state["gamma"],
             min_value=0.0,
             max_value=1.0,
         )
