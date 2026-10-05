@@ -8,13 +8,13 @@ import rasterio
 import streamlit as st
 import torch
 from matplotlib.patches import Patch
-from ndvi import get_landsat_ndvi_and_temp_matrix, get_landsat_ndvi_matrix
 from scipy.ndimage import gaussian_filter
 from scipy.signal import convolve2d
 from shapely.geometry import MultiPoint, Polygon
 from skimage import measure
 
 from georef import GridGeoref
+from ndvi import get_landsat_ndvi_and_temp_matrix, get_landsat_ndvi_matrix
 from simulation import (
     create_polygon,
     generate_wind_kernel,
@@ -54,7 +54,46 @@ def get_unet(horizon):
     model.eval()
     return model, ckpt
 
+# Show the popup on first load
+if "show_popup" not in st.session_state:
+    st.session_state.show_popup = True
 
+@st.dialog("What is this?", dismissible=False)
+def quick_test_popup():
+    st.markdown("""
+    This page lets you watch a crop disease spread across a real agricultural
+    field and see an AI model try to predict where it will go next.
+    """)
+
+    st.markdown("**What's real and what's simulated**")
+    st.markdown("""
+    - The vegetation map comes from real satellite imagery at the location
+      you choose.
+    - The disease outbreak is simulated. You control how fast it spreads,
+     how wind carries it, and detection rates.
+    - The AI forecast is a neural network trained on hundreds of simulated
+      outbreaks. It only sees the detection reports, not the true infection,
+      and predicts where the outbreak will be in the next 1 to 4 days.
+    """)
+
+    st.markdown(
+        "[Tutorial unfinished, will provide link soon](https://google.com) "
+        "for a step-by-step walkthrough."
+    )
+
+    st.warning(
+        "This is a research demo, not a real outbreak warning system.\n\n"
+        "All disease spread shown on this page is simulated.\n\n"
+        "NDVI images will be cropped to 80x80 grids for model inputs"
+    )
+
+    if st.button("Close"):
+        st.session_state.show_popup = False
+        st.rerun()
+
+# Open the dialog if the flag is True
+if st.session_state.show_popup:
+    quick_test_popup()
 
 def generate_report_grid(I, S, ndvi, fp=0.01, fn=0.01, seed=None):
     """
