@@ -1,28 +1,16 @@
-import os
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import rasterio
 import streamlit as st
 import torch
 from matplotlib.patches import Patch
-from scipy.ndimage import gaussian_filter
-from scipy.signal import convolve2d
-from shapely.geometry import MultiPoint, Polygon
-from skimage import measure
 
 from georef import GridGeoref
-from ndvi import get_landsat_ndvi_and_temp_matrix, get_landsat_ndvi_matrix
-from simulation import (
-    create_polygon,
-    generate_wind_kernel,
-    plot_overlay,
-    sir_spatial_step,
-    start_SIR_random,
-    start_SIR_random_middle,
-)
+from ndvi import get_landsat_ndvi_and_temp_matrix
+from sim_class import simModel
+from simulation import create_polygon, plot_overlay
 from unet import (
     _fit_grid,
     _window_from_reports,
@@ -39,6 +27,11 @@ MODELS = {
     4: "models/unet_h4_w6.pth",
 }
 WINDOW_SIZE = 6  # shared across all four
+
+# simModel is created in preallocated mode, which requires a fixed maximum
+# number of days up front. Users can still step the sim in chunks; if they try
+# to exceed this, sim.step raises IndexError and the app shows an error.
+MAX_SIM_DAYS = 365
 
 
 @st.cache_resource
@@ -100,20 +93,10 @@ if st.session_state.show_popup:
     quick_test_popup()
 
 
-def generate_report_grid(I, S, ndvi, fp=0.01, fn=0.01, seed=None):
-    """
-    Mimic simModel.createReportGrid on the current simulation state.
-    Produces a (H, W) uint8 grid of report counts per cell for one day.
-    """
-    rng = np.random.default_rng(seed)
-    tp = rng.poisson(I * ndvi * 10)
-    if fn > 0:
-        tp = rng.binomial(tp, 1.0 - fn)
-    fp_arr = rng.poisson(S * ndvi * fp)
-    return np.clip(tp + fp_arr, 0, 255).astype(np.uint8)
-
-
-def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
+# -----------------------------------------------------------------------------
+# UNet prediction / comparison
+# -----------------------------------------------------------------------------
+def run_unet_prediction(horizon, threshold=0.5):
     """
     Run one model (chosen by horizon k) on the current simulation state
     and display its k-day forecast.
@@ -126,11 +109,19 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
         )
         return
 
-    reports_list = st.session_state.get("reports_list", [])
-    if len(reports_list) < WINDOW_SIZE:
+    sim = st.session_state.get("sim")
+    if sim is None:
+        st.warning(
+            "No simulation yet. Click 'Initialize Spreading Capabilities' and "
+            "run some timesteps first."
+        )
+        return
+
+    reports = sim.report_grids
+    if reports.shape[0] < WINDOW_SIZE:
         st.warning(
             f"Need at least {WINDOW_SIZE} simulated days to build the "
-            f"model input; have {len(reports_list)}. "
+            f"model input; have {reports.shape[0]}. "
             f"Run the simulation longer."
         )
         return
@@ -142,8 +133,7 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
     subtract_one = info.get("subtract_one", True)
     log1p_window = info.get("log1p_window", True)
 
-    reports = np.stack(reports_list, axis=0)  # (D, H, W)
-    ndvi = st.session_state["ndvi"]
+    ndvi = sim.ndvi
 
     window = _window_from_reports(reports, WINDOW_SIZE).astype(np.int32)
     th, tw = target_size
@@ -163,14 +153,14 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
 
     t = probs.shape[0] - 1
     current_window = window_fit[t]
-    current_I = _fit_grid(st.session_state["I"], th, tw, 0.0)
+    current_I = _fit_grid(sim.I, th, tw, 0.0)
 
     # --- figure ---
     fig, axes = plt.subplots(2, k + 2, figsize=(3 * (k + 2), 6.5))
 
     ax = axes[0, 0]
     im = ax.imshow(current_window, cmap="Greys", origin="upper")
-    ax.set_title(f"window input (day {len(reports_list)})", fontsize=10)
+    ax.set_title(f"window input (day {reports.shape[0]})", fontsize=10)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -238,16 +228,19 @@ def run_unet_comparison(threshold=0.5):
     Because horizon and window size are fixed across models, the input
     tensor is identical for all four; only the head differs.
     """
-    reports_list = st.session_state.get("reports_list", [])
-    if len(reports_list) < WINDOW_SIZE:
+    sim = st.session_state.get("sim")
+    if sim is None:
+        st.warning("No simulation yet. Initialize and run some timesteps first.")
+        return
+
+    reports = sim.report_grids
+    if reports.shape[0] < WINDOW_SIZE:
         st.warning(
-            f"Need at least {WINDOW_SIZE} simulated days; have {len(reports_list)}."
+            f"Need at least {WINDOW_SIZE} simulated days; have {reports.shape[0]}."
         )
         return
 
-    reports = np.stack(reports_list, axis=0)
-    ndvi = st.session_state["ndvi"]
-
+    ndvi = sim.ndvi
     window = _window_from_reports(reports, WINDOW_SIZE).astype(np.int32)
 
     # all models share target_size / subtract_one, so use the first one
@@ -270,7 +263,7 @@ def run_unet_comparison(threshold=0.5):
 
     x_seq = build_inputs(ndvi_fit, window_fit, log1p_window=log1p_window)
 
-    current_I = _fit_grid(st.session_state["I"], th, tw, 0.0)
+    current_I = _fit_grid(sim.I, th, tw, 0.0)
 
     rows = []
     for horizon in sorted(MODELS.keys()):
@@ -322,9 +315,10 @@ def run_unet_comparison(threshold=0.5):
 st.set_page_config(layout="wide")
 
 
-# functions
+# -----------------------------------------------------------------------------
+# Satellite data
+# -----------------------------------------------------------------------------
 def get_NDVI(lati, longi, dist):
-
     status_placeholder = st.empty()
 
     status_placeholder.info("Attempting to get data from API...")
@@ -338,123 +332,88 @@ def get_NDVI(lati, longi, dist):
         st.session_state["temps"] = temp
         st.write("Got Ndvi")
         st.session_state["lati"] = lati
-        st.session_state["long"] = long
+        st.session_state["long"] = longi
         st.session_state["dist"] = dist
-        if "conv_matrix" in st.session_state:
-            del st.session_state["conv_matrix"]
-
+        # New NDVI invalidates any running sim.
+        st.session_state.pop("sim", None)
         status_placeholder.success("Data Acquired")
     except Exception as e:
         print(f"An error occurred: {e}")
         status_placeholder.error(f"Failed to fetch data. Error {e}")
 
 
-def generate_latlon_matrix(input_matrix, center_coords, dist_per_cell=15):
-    """
-    creates a matrix of shape input_matrix with each value relating of the estimated long/lat
-
-    INPUTS
-    ---------
-    input_matrix = 2d numpy array
-    center_idx = tuple (row,column) indicating the indicie of the center (might be removable)
-    center_coords = tuple (lat, long) cooresponding to the coord of the center idx
-    dist_per_cell = distance for each cell, in meters
-
-    RETURNS
-    ---------
-    numpy array with shape of input and one additional layer, representing each spaces relative coordinate
-    """
-    rows, cols = input_matrix.shape
-    center_row, center_col = input_matrix.shape
-    center_lat, center_lon = center_coords
-
-    # constants
-    R = 6378137.0  # radius of the earth
-    RAD_PER_DEG = np.pi / 180.0
-    DEG_PER_RAD = 180.0 / np.pi
-
-    cos_lat = np.cos(center_lat * RAD_PER_DEG)
-    lat_scale = (dist_per_cell / R) * DEG_PER_RAD
-    lon_scale = (dist_per_cell / (R * cos_lat)) * DEG_PER_RAD
-
-    # creating meshgrid
-    y_indices = -(np.arange(rows) - center_row)
-    x_indices = np.arange(cols) - center_col
-
-    x_offsets, y_offsets = np.meshgrid(x_indices, y_indices)
-
-    # calculating
-    target_lats = center_lat + (y_offsets * lat_scale)
-    target_lons = center_lon + (x_offsets * lon_scale)
-
-    # combining
-    coordinate_matrix = np.dstack((target_lats, target_lons))
-
-    return coordinate_matrix
-
-
+# -----------------------------------------------------------------------------
+# Simulation
+# -----------------------------------------------------------------------------
 def init_matrix(spreadability, variance, wind_x, wind_y, magni_mult):
-
+    """
+    Build a fresh simModel: dispersal kernel, initial infection, and
+    preallocated history/report buffers. Replaces the old manual
+    S/I/R + conv_matrix + reports_list bookkeeping.
+    """
     status_placeholder = st.empty()
     ndvi = st.session_state["ndvi"]
     status_placeholder.info("Calculating Kernel")
-    conv_matrix = generate_wind_kernel(
-        radius=spreadability,
+
+    sim = simModel(
+        ndvi=ndvi,
+        center_coords=(st.session_state["lati"], st.session_state["long"]),
+        dist_per_grid=15,
+        fp=0.01,
+        fn=0.01,
+        beta=st.session_state["beta"],
+        gamma=st.session_state["gamma"],
+        total_steps=MAX_SIM_DAYS,
+    )
+
+    # simModel.createMatrix does exactly what generate_wind_kernel used to.
+    sim.createMatrix(
+        radius=int(spreadability),
         sigma=variance,
         wind_x=wind_x * magni_mult,
         wind_y=-wind_y * magni_mult,
     )
-    S, I, R = start_SIR_random_middle(ndvi)
 
+    # Place one infected cell in the middle third of the grid (same behaviour
+    # as start_SIR_random_middle) and build the lat/lon lookup matrix.
+    sim.initSim(mode="middle")
+
+    st.session_state["sim"] = sim
     st.session_state["var"] = variance
     st.session_state["spread"] = spreadability
-    st.session_state["S"] = S
-    st.session_state["I"] = I
-    st.session_state["R"] = R
-    st.session_state["conv_matrix"] = conv_matrix
-    st.session_state["reports_list"] = []
-    st.session_state["timetotal"] = 0
-    try:  # to differentiate between function being run with or without the code block being displayed
-        st.session_state["beta"] = beta
-        st.session_state["wind_x"] = wind_x
-        st.session_state["wind_y"] = wind_y
-        st.session_state["magni_mult"] = magni_mult
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        status_placeholder.error(f"Failed to init Matrix. Error {e}")
+    st.session_state["wind_x"] = wind_x
+    st.session_state["wind_y"] = wind_y
+    st.session_state["magni_mult"] = magni_mult
 
     status_placeholder.success("Finished")
+    ndvi = st.session_state["ndvi"]
+    print(ndvi.min(), (ndvi < 0).sum(), ndvi.shape)
 
 
 def simulate_steps(timestep):
-
+    """
+    Advance the current simModel by `timestep` days. Report grids and history
+    are written internally by sim.step -> sim._single_step, so this function
+    only needs to render the SIR composite figure.
+    """
     status_placeholder = st.empty()
-    ndvi = st.session_state["ndvi"]
+    sim = st.session_state["sim"]
     status_placeholder.info("Starting")
-    timetotal = st.session_state["timetotal"]
-    conv_matrix = st.session_state["conv_matrix"]
-    S = st.session_state["S"]
-    I = st.session_state["I"]
-    R = st.session_state["R"]
-    for t in range(timestep):
-        timetotal += 1
-        S, I, R = sir_spatial_step(
-            S,
-            I,
-            R,
-            ndvi,
-            conv_matrix,
-            st.session_state["beta"],
-            st.session_state["gamma"],
-        )
-        report = generate_report_grid(I, S, ndvi)
-        st.session_state.setdefault("reports_list", []).append(report)
-    status_placeholder.success("Finished")
-    st.session_state["S"] = S
-    st.session_state["I"] = I
-    st.session_state["R"] = R
 
-    rgb_grid = np.stack([I, R, S], axis=-1)
+    try:
+        sim.step(steps=int(timestep))
+    except IndexError as e:
+        # simModel preallocates history/report buffers; stepping past
+        # total_steps raises IndexError.
+        status_placeholder.error(
+            f"Reached the preallocated simulation length "
+            f"({MAX_SIM_DAYS} days): {e}"
+        )
+        return
+
+    status_placeholder.success("Finished")
+
+    rgb_grid = np.stack([sim.I, sim.R, sim.S], axis=-1)
 
     fig2, ax2 = plt.subplots(figsize=(8, 8))
 
@@ -471,12 +430,9 @@ def simulate_steps(timestep):
 
     ax2.legend(handles=legend_elements, loc="upper right", bbox_to_anchor=(1.15, 1))
 
-    # Apply tight layout formatting to the overall figure
     fig2.tight_layout()
     st.session_state["Simulation_graph"] = fig2
     st.session_state["Simulation_ax"] = ax2
-
-    # st.pyplot(fig2)
 
 
 # Hides the declaration block of the website
@@ -677,9 +633,6 @@ if st.session_state.show_all:
                 st.session_state["norm_y"],
                 magni_mult,
             )
-    # with simcol3:
-    #     if st.button(f"Simulate {timestep} timesteps"):
-    #         simulate_steps(timestep)
 
 tab1, tab2, tab3 = st.tabs(
     ["Satellite NDVI View", "SIR Simulation View", "Temperature display"]
@@ -707,7 +660,8 @@ with tab2:
         threshhold = st.number_input("threshhold", value=0.01)
     with sim_col:
         if st.button(f"Simulate {timestep} Timesteps"):
-            if "conv_matrix" not in st.session_state:
+            # Auto-init a sim if the user hasn't clicked Initialize yet.
+            if "sim" not in st.session_state:
                 init_matrix(
                     st.session_state["spread"],
                     st.session_state["var"],
@@ -717,19 +671,20 @@ with tab2:
                 )
 
             simulate_steps(timestep)
-            locs = generate_latlon_matrix(
-                input_matrix=st.session_state["I"],
-                center_coords=(st.session_state["lati"], st.session_state["long"]),
-            )
-            georef = GridGeoref.from_locs(locs, dist_per_cell=15)
+            sim = st.session_state["sim"]
+
+            # simModel.generate_latlon_matrix (called during initSim) already
+            # populates sim.coordinate_matrix, so we don't need the local
+            # helper any more.
+            georef = GridGeoref.from_locs(sim.coordinate_matrix, dist_per_cell=15)
             polygon = create_polygon(
-                prob_grid=st.session_state["I"],
+                prob_grid=sim.I,
                 georef=georef,
                 threshold=threshhold,
                 method="contour",
             )
             st.session_state["Simulation_graph"] = plot_overlay(
-                grid=st.session_state["I"], polygon=polygon, georef=georef
+                grid=sim.I, polygon=polygon, georef=georef
             )
 
     graph_col, padding_col = st.columns([0.5, 0.5])

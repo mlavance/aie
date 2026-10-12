@@ -93,9 +93,11 @@ def get_landsat_ndvi_matrix(lat, lon, half_side_meters=500):
   # Using np.errstate prevents warnings if both NIR and Red are 0 in a pixel (e.g. data gaps)
   with np.errstate(divide='ignore', invalid='ignore'):
     ndvi = (nir - red) / (nir + red)
-
-    # replace nan with 0s
-    ndvi = np.nan_to_num(ndvi, nan=0.0)
+    # replace NaN and infinities with 0
+    ndvi = np.nan_to_num(ndvi, nan=0.0, posinf=0.0, neginf=0.0)
+    # NDVI is signed (-1..1); negative pixels are non-vegetated.
+    # Clip to [0, 1] so downstream Poisson draws are valid.
+    ndvi = np.clip(ndvi, 0.0, 1.0)
 
   print(f"NDVI processing complete. Result shape: {ndvi.shape}")
   return ndvi

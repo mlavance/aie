@@ -50,13 +50,25 @@ class simModel:
         beta=None,
         gamma=None,
         total_steps=None,
+        recovery=False,
     ):
-        self.ndvi = ndvi
-        self.coords = center_coords
-        self.dist = dist_per_grid
-        self.fp = fp
-        self.fn = fn
-        self.scaleReports = None
+        """
+        ndvi : ndvi grid from landsat via planetary computer api
+        center coords : cordinates of the center of the ndvi reading
+        dist_per_grid : square meters each grid cell covers from the api, defaults to 15
+        fp/fn : false rates for positive and negative detections from image recognition
+        beta : spread rate
+        gamma : removal rate #NOTE defaults to false because image detection model might 
+                be able to detect dead plants and consider those as infected for spread calculations
+        total_steps : how many steps to preallocate #NOTE can be used by end user, but primarily for generating training data
+        recovery : toggle for above gamma to be used in the randomBG function
+        """
+        #checking inputs
+        if fn > 1 or fn < 0: 
+            raise ValueError(f"False Negative must be between 0 and 1, was passed {fn}")
+
+        if fp > 1 or fp < 0:
+            raise ValueError(f"False Positive must be between 0 and 1, was passed {fp}")
 
         if not ((beta is None) ^ (gamma is None)):
             self.beta = beta
@@ -66,6 +78,19 @@ class simModel:
                 "Only one beta or gamma was provided, requires neither or both"
             )
 
+        if beta is not None and (beta > 1 or beta < 0):
+            raise ValueError(f"Beta must be between 0 and 1, was passed {beta}")
+
+        if gamma is not None and (gamma > 1 or gamma < 0):
+            raise ValueError(f"Gamma must be between 0 and 1, was passed {gamma}")
+
+        self.ndvi = ndvi
+        self.coords = center_coords
+        self.dist = dist_per_grid
+        self.fp = fp
+        self.fn = fn
+        self.scaleReports = None
+        self.recovery = recovery
         # Storage mode. If total_steps is given we preallocate fixed-size
         # history buffers (fast, memory-efficient for training data generation).
         # Otherwise we fall back to the simple list+stack path for small sims.
@@ -74,12 +99,14 @@ class simModel:
             self._prealloc = True
             self._S_buf = None  # allocated in randomMiddle once shape is known
             self._I_buf = None
+            self._reports_buf = None  # array in prealloc mode, list in non-prealloc
             self._hist_count = 0  # number of frames written so far
         else:
             self.total_steps = None
             self._prealloc = False
             self._S_hist_arr = None  # plain stacked array, non-prealloc path
             self._I_hist_arr = None
+            self._reports_buf = None
 
     def createMatrix(self, radius=2, sigma=1.0, wind_x=0.0, wind_y=0.0):
         """
@@ -127,10 +154,7 @@ class simModel:
         if choice in ["unviable", "slow", "normal", "fast"]:
             disease_type = choice
         else:
-            disease_type = random.choice(["unviable", "slow", "normal", "fast"])
-            # NOTE: This line overrides the random choice above, so the default
-            # behavior is always "fast" when `choice` is not explicitly valid.
-            disease_type = "fast"
+            disease_type = random.choice(["slow", "normal", "fast"])
 
         while True:
             if disease_type == "unviable":
@@ -182,7 +206,9 @@ class simModel:
                     break
 
         self.beta = beta
-        self.gamma = 0
+        self.gamma = gamma
+        if not self.recovery:
+            self.gamma = 0
 
     def setBG(self, beta, gamma):
         """Manually set the transmission and recovery rates."""
@@ -260,7 +286,7 @@ class simModel:
                 f"using ({row}, {col}) with NDVI={self.ndvi[row, col]:.3f}"
             )
 
-        I[row, col] = 1
+        I[row, col] = .2
 
         # 2. Create susceptible and recovered arrays.
         S = np.zeros_like(input_np) + 1 - I
@@ -277,13 +303,20 @@ class simModel:
         # Save initial history.
         n_rows, n_cols = I.shape
         if self._prealloc:
-            self._S_buf = np.empty((self.total_steps + 1, n_rows, n_cols), dtype=np.float32)
-            self._I_buf = np.empty((self.total_steps + 1, n_rows, n_cols), dtype=np.float32)
-            self._reports_buf = np.empty((self.total_steps, n_rows, n_cols), dtype=np.uint16)
+            self._S_buf = np.empty(
+                (self.total_steps + 1, n_rows, n_cols), dtype=np.float32
+            )
+            self._I_buf = np.empty(
+                (self.total_steps + 1, n_rows, n_cols), dtype=np.float32
+            )
+            self._reports_buf = np.empty(
+                (self.total_steps, n_rows, n_cols), dtype=np.uint16
+            )
             self._S_buf[0] = S
             self._I_buf[0] = I
             self._hist_count = 1
         else:
+            self._reports_buf = []
             self.S_hist = S
             self.I_hist = I
 
@@ -329,6 +362,25 @@ class simModel:
                 "write to self._I_buf instead"
             )
         self._I_hist_arr = value
+
+    @property
+    def report_grids(self):
+        """
+        Per-day report grids accumulated so far, shape (D, n_rows, n_cols).
+
+        Preallocated mode: zero-copy slice of the internal uint16 buffer,
+        covering days 1..self.day.
+        Non-preallocated mode: the list is stacked on demand.
+        Returns an empty (0, H, W) array if the sim has not stepped yet.
+        """
+        shape = (0,) + self.I.shape
+        if self._reports_buf is None:
+            return np.empty(shape, dtype=np.uint16)
+        if self._prealloc:
+            return self._reports_buf[: self.day]
+        if len(self._reports_buf) == 0:
+            return np.empty(shape, dtype=np.uint16)
+        return np.stack(self._reports_buf, axis=0)
 
     def _single_step(self):
         """
@@ -377,17 +429,19 @@ class simModel:
             self.S_hist = np.vstack((self.S_hist, self.S.copy()))
             self.I_hist = np.vstack((self.I_hist, self.I.copy()))
 
-        # Update reports. On the first call, self.reports does not exist,
-        # so the AttributeError branch initializes it.
-        try:
-            self.day = self.day + 1
-            self.reports = np.vstack((self.reports, self.createReports()))
+        # Update reports. On the first call, self.reports does not exist yet.
+        self.day = getattr(self, "day", 0) + 1
+        day_reports = self.createReports()
+        prev = getattr(self, "reports", None)
+        if prev is None:
+            self.reports = day_reports
+        else:
+            self.reports = np.vstack((prev, day_reports))
 
-        except AttributeError:
-            self.day = 1
-            self.reports = self.createReports()
-        
-        self._reports_buf[self.day - 1] = self.createReportGrid()
+        if self._prealloc:
+            self._reports_buf[self.day - 1] = self.createReportGrid()
+        else:
+            self._reports_buf.append(self.createReportGrid())
 
     def step(self, steps=1):
         """
@@ -459,70 +513,52 @@ class simModel:
           - False negatives are applied with probability self.fn.
           - False positives are drawn as Poisson counts from S * NDVI * self.fp.
         """
-        # Possible fixes/considerations:
-        # - Restrict reports to be within a certain distance of the outbreak;
-        #   this may be computationally intensive.
-        # - Make the NDVI range smaller so reports cover fewer farms at once.
-        #   Some large farms may not be fully covered, while multiple small
-        #   farms can be covered in one cell.
-
         rng = np.random.default_rng(seed)
-        plantidx = self.ndvi
 
-        # True positive reports: Poisson-distributed counts based on infected
-        # density and NDVI.
-        counts = rng.poisson(self.I * plantidx)
-        rows, cols = np.nonzero(counts)
-        n = counts[rows, cols]
+        # NDVI can be negative (water, cloud, shadow, bare soil). Poisson
+        # requires lam >= 0, so clip before sampling.
+        plantidx = np.clip(np.asarray(self.ndvi, dtype=float), 0.0, None)
 
-        # Expand each cell into repeated rows/cols according to its count.
+        # True positives: Poisson from infected * NDVI.
+        tp_lam = np.clip(self.I * plantidx, 0.0, None)
+        tp_counts = rng.poisson(tp_lam)
+
+        # False positives: Poisson from susceptible * NDVI * fp.
+        fp_lam = np.clip(self.S * plantidx * self.fp, 0.0, None)
+        fp_counts = rng.poisson(fp_lam)
+
+        # False negatives: each true detection is missed with prob self.fn.
+        # Binomial thinning preserves the Poisson process exactly.
+        if self.fn > 0:
+            tp_counts = rng.binomial(tp_counts, 1.0 - self.fn)
+
+        total = tp_counts + fp_counts
+        if not np.any(total):
+            return np.empty((0, 3), dtype=float)
+
+        # Expand each cell's count into repeated row/col indices.
+        rows, cols = np.nonzero(total)
+        n = total[rows, cols]
         rows_rep = np.repeat(rows, n)
         cols_rep = np.repeat(cols, n)
 
-        # False negatives: each true positive has self.fn chance of being missed.
-        if len(rows_rep) > 0:
-            keep = rng.random(len(rows_rep)) >= self.fn
-            rows_rep = rows_rep[keep]
-            cols_rep = cols_rep[keep]
+        # Shuffle so TP and FP reports are interleaved rather than
+        # false positives always trailing at the end.
+        perm = rng.permutation(len(rows_rep))
+        rows_rep = rows_rep[perm]
+        cols_rep = cols_rep[perm]
 
-        # False positives: susceptible cells can generate spurious reports.
-        fp_counts = rng.poisson(self.S * plantidx * self.fp)
-        fp_rows, fp_cols = np.nonzero(fp_counts)
-        fp_n = fp_counts[fp_rows, fp_cols]
-        fp_rows_rep = np.repeat(fp_rows, fp_n)
-        fp_cols_rep = np.repeat(fp_cols, fp_n)
+        # self.coordinate_matrix is (rows, cols, 2), last axis [lat, lon].
+        lat = self.coordinate_matrix[rows_rep, cols_rep, 0].astype(float)
+        lon = self.coordinate_matrix[rows_rep, cols_rep, 1].astype(float)
 
-        # Combine true positives and false positives.
-        all_rows = np.concatenate([rows_rep, fp_rows_rep])
-        all_cols = np.concatenate([cols_rep, fp_cols_rep])
-
-        if len(all_rows) == 0:
-            return np.empty((0, 3), dtype=float)
-
-        # Shuffle so true-positive and false-positive reports are interleaved
-        # rather than false positives always trailing at the end.
-        perm = rng.permutation(len(all_rows))
-        all_rows = all_rows[perm]
-        all_cols = all_cols[perm]
-
-        # self.coordinate_matrix is (rows, cols, 2) with the last axis ordered
-        # as [latitude, longitude].
-        lat = self.coordinate_matrix[all_rows, all_cols, 0].astype(float)
-        lon = self.coordinate_matrix[all_rows, all_cols, 1].astype(float)
-
-        # Jitter each report to a random point inside its grid cell rather than
-        # always reporting the exact cell-center coordinate.
-        # NOTE: self.dist is in meters, but lat/lon are in degrees. This jitter
-        # likely needs a meters-to-degrees conversion, similar to the scales
-        # computed in generate_latlon_matrix().
+        # Jitter each report to a random point inside its grid cell rather
+        # than always reporting the exact cell-center coordinate.
         lat = lat + rng.uniform(-self.lat_scale / 2, self.lat_scale / 2, size=lat.shape)
         lon = lon + rng.uniform(-self.lon_scale / 2, self.lon_scale / 2, size=lon.shape)
 
         day_col = np.full(lat.shape, self.day, dtype=float)
-
-        reports = np.column_stack([lat, lon, day_col])
-
-        return reports
+        return np.column_stack([lat, lon, day_col])
 
     def outputReports(self):
         # small function to convert the output from genReports() to a format readable by the st-gnn
@@ -911,15 +947,16 @@ class simModel:
 
         return sim
 
-
-    def crop_ndvi(self, size = 100):
+    def crop_ndvi(self, size=100):
         M, N = self.ndvi.shape
 
         # Compute starting indices for the crop
         start_row = (M - size) // 2
         start_col = (N - size) // 2
-    
-        self.ndvi = self.ndvi[start_row:start_row + size, start_col:start_col + size]
+
+        self.ndvi = self.ndvi[
+            start_row : start_row + size, start_col : start_col + size
+        ]
 
         return 1
 
@@ -929,40 +966,26 @@ class simModel:
 
         Returns
         -------
-        report_grid : ndarray, shape (n_rows, n_cols), dtype float32
-            Number of reports originating from each cell. Cells with no reports
-            have value 0. The array is always the same shape as self.I and
-            self.ndvi.
-
-        Notes
-        -----
-        True positives are Poisson counts from I * NDVI, then thinned by a
-        Binomial draw with probability (1 - fn) to model missed detections.
-        False positives are Poisson counts from S * NDVI * fp.
-
-        Binomial thinning is statistically equivalent to applying the false
-        negative rate per individual report, but runs in one vectorized call
-        instead of expanding counts into per-report rows.
+        report_grid : ndarray, shape (n_rows, n_cols), dtype uint16
+            Number of reports originating from each cell.
         """
         rng = np.random.default_rng(seed)
-        if self.scaleReports != None:
-            plantidx = self.ndvi * self.scaleReports
-        else:
-            plantidx = self.ndvi
 
-        # True positive reports: Poisson counts from infected * NDVI
-        tp_counts = rng.poisson(self.I * plantidx)
+        # Clip NDVI to non-negative: Poisson requires lam >= 0.
+        plantidx = np.clip(np.asarray(self.ndvi, dtype=float), 0.0, None)
+        if self.scaleReports is not None:
+            plantidx = plantidx * self.scaleReports
 
-        # False negatives: each detection is missed with probability self.fn.
-        # Binomial thinning preserves the Poisson process exactly.
+        tp_lam = np.clip(self.I * plantidx, 0.0, None)
+        tp_counts = rng.poisson(tp_lam)
+
         if self.fn > 0:
             tp_counts = rng.binomial(tp_counts, 1.0 - self.fn)
 
-        # False positives: susceptible cells generate spurious reports
-        fp_counts = rng.poisson(self.S * plantidx * self.fp)
+        fp_lam = np.clip(self.S * plantidx * self.fp, 0.0, None)
+        fp_counts = rng.poisson(fp_lam)
 
-        report_grid = (tp_counts + fp_counts).astype(np.uint16)
-        return report_grid
+        return (tp_counts + fp_counts).astype(np.uint16)
 
     def savewindow(self, size):
         """
@@ -985,7 +1008,7 @@ class simModel:
         if size < 1:
             raise ValueError(f"size must be >= 1, got {size}")
 
-        reports = self._reports_buf[: self.day]
+        reports = self.report_grids
         if reports.size == 0:
             return np.empty((0,) + reports.shape[1:], dtype=np.uint16)
 
@@ -1001,8 +1024,9 @@ class simModel:
         result[size:] = cumsum[size:] - cumsum[:-size]
         return result.astype(np.uint16)
 
-    def save_window(self, output_dir="simdata_windows", ext=".npz",
-                    infected_threshold=0.1):
+    def save_window(
+        self, output_dir="simdata_windows", ext=".npz", infected_threshold=0.1
+    ):
         """
         Save a training file for unet_report.py containing only what the model
         and loss need:
@@ -1027,12 +1051,12 @@ class simModel:
         -------
         filepath : Path to the written file
         """
-        if self._reports_buf is None or self.day == 0:
+        if getattr(self, "day", 0) == 0:
             raise RuntimeError(
                 "no reports accumulated yet; call step() or complete_sim() first"
             )
 
-        reports = self._reports_buf[: self.day]
+        reports = self.report_grids
 
         i_hist = self.I_hist
         if i_hist.shape[0] == self.day + 1:
@@ -1061,4 +1085,3 @@ class simModel:
             center_lon=np.float64(self.coords[1]),
         )
         return filepath
-
