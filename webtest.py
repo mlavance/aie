@@ -38,7 +38,7 @@ MODELS = {
     3: "models/unet_h3_w6.pth",
     4: "models/unet_h4_w6.pth",
 }
-WINDOW_SIZE = 6   # shared across all four
+WINDOW_SIZE = 6  # shared across all four
 
 
 @st.cache_resource
@@ -54,9 +54,11 @@ def get_unet(horizon):
     model.eval()
     return model, ckpt
 
+
 # Show the popup on first load
 if "show_popup" not in st.session_state:
     st.session_state.show_popup = True
+
 
 @st.dialog("What is this?", dismissible=False)
 def quick_test_popup():
@@ -86,14 +88,17 @@ def quick_test_popup():
         "All disease spread shown on this page is simulated.\n\n"
         "NDVI images will be cropped to 80x80 grids for model inputs"
     )
+    agreed = st.checkbox("I understand that this website is a demo")
 
-    if st.button("Close"):
+    if st.button("Close", disabled=not agreed):
         st.session_state.show_popup = False
         st.rerun()
+
 
 # Open the dialog if the flag is True
 if st.session_state.show_popup:
     quick_test_popup()
+
 
 def generate_report_grid(I, S, ndvi, fp=0.01, fn=0.01, seed=None):
     """
@@ -101,7 +106,7 @@ def generate_report_grid(I, S, ndvi, fp=0.01, fn=0.01, seed=None):
     Produces a (H, W) uint8 grid of report counts per cell for one day.
     """
     rng = np.random.default_rng(seed)
-    tp = rng.poisson(I * ndvi*10)
+    tp = rng.poisson(I * ndvi * 10)
     if fn > 0:
         tp = rng.binomial(tp, 1.0 - fn)
     fp_arr = rng.poisson(S * ndvi * fp)
@@ -137,7 +142,7 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
     subtract_one = info.get("subtract_one", True)
     log1p_window = info.get("log1p_window", True)
 
-    reports = np.stack(reports_list, axis=0)   # (D, H, W)
+    reports = np.stack(reports_list, axis=0)  # (D, H, W)
     ndvi = st.session_state["ndvi"]
 
     window = _window_from_reports(reports, WINDOW_SIZE).astype(np.int32)
@@ -167,42 +172,48 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
     im = ax.imshow(current_window, cmap="Greys", origin="upper")
     ax.set_title(f"window input (day {len(reports_list)})", fontsize=10)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     ax = axes[0, 1]
     im = ax.imshow(current_I, cmap="hot", vmin=0, vmax=1, origin="upper")
     ax.set_title("current infected (sim)", fontsize=10)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     for c in range(k):
         ax = axes[0, c + 2]
         im = ax.imshow(probs[t, c], cmap="hot", vmin=0, vmax=1, origin="upper")
-        ax.set_title(f"pred +{c+1}  (m={probs[t, c].mean():.3f})", fontsize=10)
+        ax.set_title(f"pred +{c + 1}  (m={probs[t, c].mean():.3f})", fontsize=10)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     ax = axes[1, 0]
-    ax.imshow((current_window > 0).astype(float), cmap="Greys",
-              vmin=0, vmax=1, origin="upper")
+    ax.imshow(
+        (current_window > 0).astype(float), cmap="Greys", vmin=0, vmax=1, origin="upper"
+    )
     ax.set_title("reported cells", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     ax = axes[1, 1]
     ax.imshow(current_I, cmap="hot", vmin=0, vmax=1, origin="upper")
     ax.set_title("infected truth", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     for c in range(k):
         ax = axes[1, c + 2]
         mask = (probs[t, c] > threshold).astype(float)
         ax.imshow(mask, cmap="hot", vmin=0, vmax=1, origin="upper")
-        ax.set_title(f"mask +{c+1}  ({mask.mean()*100:.1f}%)", fontsize=10)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(f"mask +{c + 1}  ({mask.mean() * 100:.1f}%)", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     fig.suptitle(
-        f"UNet forecast (horizon k={k}, window={WINDOW_SIZE}, "
-        f"threshold={threshold})",
+        f"UNet forecast (horizon k={k}, window={WINDOW_SIZE}, threshold={threshold})",
         fontsize=12,
     )
     plt.tight_layout()
@@ -212,9 +223,12 @@ def run_unet_prediction(horizon, threshold=0.5, fp=0.01, fn=0.01):
     st.markdown("**Predicted infection coverage by horizon**")
     cols = st.columns(k)
     for c in range(k):
-        mask = (probs[t, c] > threshold)
-        cols[c].metric(f"+{c+1} day", f"{mask.mean()*100:.1f}%",
-                       help=f"mean prob = {probs[t, c].mean():.4f}")
+        mask = probs[t, c] > threshold
+        cols[c].metric(
+            f"+{c + 1} day",
+            f"{mask.mean() * 100:.1f}%",
+            help=f"mean prob = {probs[t, c].mean():.4f}",
+        )
 
 
 def run_unet_comparison(threshold=0.5):
@@ -227,8 +241,7 @@ def run_unet_comparison(threshold=0.5):
     reports_list = st.session_state.get("reports_list", [])
     if len(reports_list) < WINDOW_SIZE:
         st.warning(
-            f"Need at least {WINDOW_SIZE} simulated days; have "
-            f"{len(reports_list)}."
+            f"Need at least {WINDOW_SIZE} simulated days; have {len(reports_list)}."
         )
         return
 
@@ -281,25 +294,31 @@ def run_unet_comparison(threshold=0.5):
     ax = axes[0]
     ax.imshow(current_I, cmap="hot", vmin=0, vmax=1, origin="upper")
     ax.set_title("sim truth", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     ax = axes[1]
-    ax.imshow((window_fit[-1] > 0).astype(float), cmap="Greys",
-              vmin=0, vmax=1, origin="upper")
+    ax.imshow(
+        (window_fit[-1] > 0).astype(float), cmap="Greys", vmin=0, vmax=1, origin="upper"
+    )
     ax.set_title("reported", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_xticks([])
+    ax.set_yticks([])
 
     for i, (horizon, pred, _) in enumerate(rows):
         ax = axes[i + 2]
         ax.imshow(pred, cmap="hot", vmin=0, vmax=1, origin="upper")
         cov = (pred > threshold).mean() * 100
         ax.set_title(f"k={horizon} pred  ({cov:.1f}%)", fontsize=10)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     fig.suptitle("Forecast comparison across horizons", fontsize=12)
     plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
+
+
 st.set_page_config(layout="wide")
 
 
@@ -312,7 +331,9 @@ def get_NDVI(lati, longi, dist):
 
     time.sleep(1)
     try:
-        ndvi, temp = get_landsat_ndvi_and_temp_matrix(lati, longi, half_side_meters=dist)
+        ndvi, temp = get_landsat_ndvi_and_temp_matrix(
+            lati, longi, half_side_meters=dist
+        )
         st.session_state["ndvi"] = ndvi
         st.session_state["temps"] = temp
         st.write("Got Ndvi")
@@ -326,6 +347,8 @@ def get_NDVI(lati, longi, dist):
     except Exception as e:
         print(f"An error occurred: {e}")
         status_placeholder.error(f"Failed to fetch data. Error {e}")
+
+
 def generate_latlon_matrix(input_matrix, center_coords, dist_per_cell=15):
     """
     creates a matrix of shape input_matrix with each value relating of the estimated long/lat
@@ -369,6 +392,7 @@ def generate_latlon_matrix(input_matrix, center_coords, dist_per_cell=15):
 
     return coordinate_matrix
 
+
 def init_matrix(spreadability, variance, wind_x, wind_y, magni_mult):
 
     status_placeholder = st.empty()
@@ -381,7 +405,7 @@ def init_matrix(spreadability, variance, wind_x, wind_y, magni_mult):
         wind_y=-wind_y * magni_mult,
     )
     S, I, R = start_SIR_random_middle(ndvi)
-    
+
     st.session_state["var"] = variance
     st.session_state["spread"] = spreadability
     st.session_state["S"] = S
@@ -392,7 +416,6 @@ def init_matrix(spreadability, variance, wind_x, wind_y, magni_mult):
     st.session_state["timetotal"] = 0
     try:  # to differentiate between function being run with or without the code block being displayed
         st.session_state["beta"] = beta
-        st.session_state["gamma"] = gamma
         st.session_state["wind_x"] = wind_x
         st.session_state["wind_y"] = wind_y
         st.session_state["magni_mult"] = magni_mult
@@ -401,7 +424,6 @@ def init_matrix(spreadability, variance, wind_x, wind_y, magni_mult):
         status_placeholder.error(f"Failed to init Matrix. Error {e}")
 
     status_placeholder.success("Finished")
-
 
 
 def simulate_steps(timestep):
@@ -417,8 +439,13 @@ def simulate_steps(timestep):
     for t in range(timestep):
         timetotal += 1
         S, I, R = sir_spatial_step(
-            S, I, R, ndvi, conv_matrix,
-            st.session_state["beta"], st.session_state["gamma"],
+            S,
+            I,
+            R,
+            ndvi,
+            conv_matrix,
+            st.session_state["beta"],
+            st.session_state["gamma"],
         )
         report = generate_report_grid(I, S, ndvi)
         st.session_state.setdefault("reports_list", []).append(report)
@@ -457,7 +484,18 @@ def toggle_layout():
     st.session_state.show_all = not st.session_state.show_all
 
 
-st.title("NDVI based crop SIR Simulation")
+st.title("NDVI Based Crop SIR Simulation")
+
+with st.expander("About this app", expanded=True):
+    st.write("""
+    NDVI is Normalized Difference Vegetation Index. NDVI is a measuremnet comparing the 
+    difference between near infrared and red light divided by their sum. This is a helpful \n\n
+    approximation for how dense an area's vegetation is, since healthy plants absorb most 
+    visible red light and reflect a large amount of near-infrared light.
+    See more about NDVI [here](https://www.earthdata.nasa.gov/topics/land-surface/normalized-difference-vegetation-index-ndvi).
+    """)
+
+
 # code block below is to make sure the variables are saved when the declaration code is toggled
 if "ndvi" not in st.session_state:
     st.session_state["ndvi"] = np.load("Default_ndvi_data.npy")
@@ -486,8 +524,15 @@ if "var" not in st.session_state:
 
 
 if st.session_state.show_all:
-
     st.header("Declare Variables")
+    with st.expander("About the Variables", expanded=True):
+        st.write("""
+        Range is the size of the ndvi to request from the planetary computer api, please note, the current minimum to be used with the U-Net is 80x80 with all NDVI grid calculations being cropped to that size. \n\n
+        Approximately 15 square meters is one grid value. If you do not wish to see the predictions, there is no restriction on size. \n\n
+        Maximum Spread Range is the maximum distance one infected plant can potentially infect another.\n\n
+        Spread Concentration how likely the disease is to spread to its maximum range, issues occur when the value provided is higher than the spread range and values between 0 and 1. \n\n
+        Rate of transmissions is an additional scalar to adjust how likely a plant is to get infected, value must be between 0 and 1.
+        """)
 
     # satellite data init
     sat_init_1, sat_init_2, sat_init_3 = st.columns(3)
@@ -503,15 +548,15 @@ if st.session_state.show_all:
     mat1, mat2, mat3 = st.columns(3)
     with mat1:
         spreadability = st.number_input(
-            "maximum spread range", value=st.session_state["spread"]
+            "Maximum Spread Range", value=st.session_state["spread"]
         )
     with mat2:
         variance = st.number_input(
-            "spread concentration", value=st.session_state["var"]
+            "Spread Concentration", value=st.session_state["var"]
         )
     with mat3:
         beta = st.number_input(
-            "Rate of transmission",
+            "Rate of Transmission",
             value=st.session_state["beta"],
             min_value=0.0,
             max_value=1.0,
@@ -529,7 +574,7 @@ if st.session_state.show_all:
         )
     with wind2:
         wind_y = st.slider(
-            "Wind Horizontal component",
+            "Wind Vertical Component",
             min_value=-1.0,
             max_value=1.0,
             value=st.session_state["wind_y"],
@@ -616,7 +661,6 @@ if st.session_state.show_all:
         if show_graph:
             st.pyplot(unitfig)
 
-
     simcol1, simcol2, simcol3 = st.columns([0.25, 0.25, 0.5])
 
     with simcol1:
@@ -637,7 +681,9 @@ if st.session_state.show_all:
     #     if st.button(f"Simulate {timestep} timesteps"):
     #         simulate_steps(timestep)
 
-tab1, tab2, tab3 = st.tabs(["Satellite NDVI View", "SIR Simulation View", "Temperature display"])
+tab1, tab2, tab3 = st.tabs(
+    ["Satellite NDVI View", "SIR Simulation View", "Temperature display"]
+)
 fig, ax = plt.subplots()
 
 with tab1:
@@ -647,7 +693,6 @@ with tab1:
     graph_col, padding_col = st.columns([0.5, 0.5])
 
     with graph_col:
-
         ax.imshow(st.session_state["ndvi"], vmin=0.0, origin="upper")
         st.session_state["ndvi_fig"] = fig
         st.session_state["ndvi_ax"] = ax
@@ -659,7 +704,7 @@ with tab2:
 
     with select_sim_col:
         timestep = st.number_input("Number of time steps to calculate", value=10)
-        threshhold = st.number_input("threshhold", value=.01)
+        threshhold = st.number_input("threshhold", value=0.01)
     with sim_col:
         if st.button(f"Simulate {timestep} Timesteps"):
             if "conv_matrix" not in st.session_state:
@@ -670,12 +715,22 @@ with tab2:
                     st.session_state["norm_y"],
                     st.session_state["magni_mult"],
                 )
-            
+
             simulate_steps(timestep)
-            locs = generate_latlon_matrix(input_matrix=st.session_state["I"],center_coords=(st.session_state["lati"],st.session_state["long"]))
+            locs = generate_latlon_matrix(
+                input_matrix=st.session_state["I"],
+                center_coords=(st.session_state["lati"], st.session_state["long"]),
+            )
             georef = GridGeoref.from_locs(locs, dist_per_cell=15)
-            polygon = create_polygon(prob_grid= st.session_state["I"], georef = georef, threshold=threshhold, method="contour")
-            st.session_state["Simulation_graph"] = plot_overlay(grid= st.session_state["I"], polygon = polygon, georef = georef)
+            polygon = create_polygon(
+                prob_grid=st.session_state["I"],
+                georef=georef,
+                threshold=threshhold,
+                method="contour",
+            )
+            st.session_state["Simulation_graph"] = plot_overlay(
+                grid=st.session_state["I"], polygon=polygon, georef=georef
+            )
 
     graph_col, padding_col = st.columns([0.5, 0.5])
     st.markdown("---")
@@ -683,15 +738,13 @@ with tab2:
 
     c1, c2, c3 = st.columns([0.4, 0.3, 0.3])
     with c1:
-        unet_threshold = st.slider(
-            "prediction threshold", 0.1, 0.9, 0.5, 0.05
-        )
+        unet_threshold = st.slider("prediction threshold", 0.1, 0.9, 0.5, 0.05)
     with c2:
         unet_horizon = st.selectbox(
             "model horizon (k)", sorted(MODELS.keys()), index=len(MODELS) - 1
         )
     with c3:
-        st.write("")   # spacer
+        st.write("")  # spacer
         st.write("")
         show_single = st.button("Show single forecast")
         show_all = st.button("Compare all horizons")
@@ -706,7 +759,7 @@ with tab2:
             fig2 = st.session_state["Simulation_graph"]
             ax2 = st.session_state["Simulation_ax"]
             st.pyplot(fig2)
-    
+
 
 with tab3:
     st.subheader("Temperature Display")
@@ -718,9 +771,7 @@ with tab3:
             fig3, ax3 = plt.subplots()
 
             im = ax3.imshow(st.session_state["temps"], origin="upper")
-            
-            fig3.colorbar(im, ax=ax3)
-            
-            st.pyplot(fig3)
 
-    
+            fig3.colorbar(im, ax=ax3)
+
+            st.pyplot(fig3)
