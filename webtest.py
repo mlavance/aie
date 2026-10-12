@@ -72,7 +72,7 @@ def quick_test_popup():
     """)
 
     st.markdown(
-        "[Tutorial unfinished, will provide link soon](https://google.com) "
+        "[Check out this video](https://youtu.be/Y1aokfLRu8k) "
         "for a step-by-step walkthrough."
     )
 
