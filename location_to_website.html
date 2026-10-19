@@ -80,8 +80,8 @@
 
         // builds url from licked location
         const url = new URL(BASE_URL);
-        url.searchParams.set("lat", lat.toFixed(6));
-        url.searchParams.set("lon", lon.toFixed(6));
+        url.searchParams.set("lati", lat.toFixed(6));
+        url.searchParams.set("long", lon.toFixed(6));
         const href = url.toString();
 
         view.openPopup({
