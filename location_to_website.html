@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Pick a Location</title>
+  <link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css" />
+  <script src="https://js.arcgis.com/4.29/"></script>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%; width: 100%;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    #viewDiv { height: 100%; width: 100%; }
+
+    /* Small instruction card, top-left */
+    #hint {
+      position: absolute; top: 12px; left: 12px; z-index: 10;
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 8px; padding: 10px 14px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+      font-size: 14px; line-height: 1.4; max-width: 260px;
+    }
+    #hint strong { display: block; margin-bottom: 4px; }
+
+    /* Popup styling */
+    .popup-content p { margin: 4px 0; }
+    .popup-content .coords {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .popup-content a { color: #0079c1; font-weight: 600; }
+    .popup-content .url {
+      word-break: break-all; font-size: 12px; color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div id="viewDiv"></div>
+
+  <div id="hint">
+    <strong>Pick a point</strong>
+    Click anywhere on the map to get the coordinates and a link for that location.
+  </div>
+
+  <script>
+    // ===================== CONFIGURATION =====================
+    const ARCGIS_API_KEY = "API_KEY";
+    const BASE_URL      = "https://aie-ndvi-website.streamlit.app/";
+    const CENTER        = [-120.812583, 37.498056];
+    const ZOOM          = 13;
+    // =========================================================
+
+    require([
+      "esri/config",
+      "esri/Map",
+      "esri/views/MapView"
+    ], (esriConfig, Map, MapView) => {
+
+      esriConfig.apiKey = ARCGIS_API_KEY;
+
+      const map = new Map({
+        basemap: "streets-vector"
+      });
+
+      const view = new MapView({
+        container: "viewDiv",
+        map: map,
+        center: CENTER,
+        zoom: ZOOM,
+        popup: {
+          dockEnabled: true,
+          dockOptions: { buttonEnabled: false, breakpoint: false }
+        }
+      });
+
+      // on click create link
+      view.on("click", (event) => {
+        const lat = event.mapPoint.latitude;
+        const lon = event.mapPoint.longitude;
+
+        // builds url from licked location
+        const url = new URL(BASE_URL);
+        url.searchParams.set("lat", lat.toFixed(6));
+        url.searchParams.set("lon", lon.toFixed(6));
+        const href = url.toString();
+
+        view.openPopup({
+          title: "Selected location",
+          location: event.mapPoint,
+          content: `
+            <div class="popup-content">
+              <p><strong>Latitude:</strong> <span class="coords">${lat.toFixed(6)}</span></p>
+              <p><strong>Longitude:</strong> <span class="coords">${lon.toFixed(6)}</span></p>
+              <p>
+                <a href="${href}" target="_blank" rel="noopener">
+                  Open link for this location &rarr;
+                </a>
+              </p>
+              <p class="url">${href}</p>
+            </div>
+          `
+        });
+      });
+    });
+  </script>
+</body>
+</html>

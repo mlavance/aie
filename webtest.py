@@ -453,30 +453,62 @@ with st.expander("About this app", expanded=True):
 
 
 # code block below is to make sure the variables are saved when the declaration code is toggled
+# functionally an api :)
+PARAM_DEFAULTS = {
+    "wind_x":    0.0,          # float
+    "wind_y":    0.0,          # float
+    "magni_mult": 1.0,         # float
+    "beta":      0.3,          # float
+    "gamma":     0.0,          # float
+    "show_all":  True,         # bool
+    "lati":      37.498056,    # float
+    "long":     -120.812583,   # float
+    "dist":      3000,         # int
+    "spread":    5,            # int
+    "var":       3,            # int
+}
+
+
+
+# ?lat=37.498056&lon=-120.812583
+def get_param(key: str, default):
+    raw = st.query_params.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        if isinstance(default, bool):
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+        if isinstance(default, int):
+            return int(raw)
+        if isinstance(default, float):
+            return float(raw)
+        return str(raw)
+    except (TypeError, ValueError):
+        return default
+
+PARAM_VALIDATORS = {
+    "beta": lambda v: 0.0 < v < 1.0,   # strict open interval
+}
+
+if "params_initialized" not in st.session_state:
+    for key, default in PARAM_DEFAULTS.items():
+        value = get_param(key, default)
+        validator = PARAM_VALIDATORS.get(key)
+        if validator is not None and not validator(value):
+            value = default
+        st.session_state[key] = value
+    st.session_state["params_initialized"] = True
+
 if "ndvi" not in st.session_state:
-    st.session_state["ndvi"] = np.load("Default_ndvi_data.npy")
-if "wind_x" not in st.session_state:
-    st.session_state["wind_x"] = 0.0
-if "wind_y" not in st.session_state:
-    st.session_state["wind_y"] = 0.0
-if "magni_mult" not in st.session_state:
-    st.session_state["magni_mult"] = 1.0
-if "beta" not in st.session_state:
-    st.session_state["beta"] = 0.3
-if "gamma" not in st.session_state:
-    st.session_state["gamma"] = 0.0
-if "show_all" not in st.session_state:
-    st.session_state.show_all = True
-if "lati" not in st.session_state:
-    st.session_state["lati"] = 37.498056
-if "long" not in st.session_state:
-    st.session_state["long"] = -120.812583
-if "dist" not in st.session_state:
-    st.session_state["dist"] = 3000
-if "spread" not in st.session_state:
-    st.session_state["spread"] = 5
-if "var" not in st.session_state:
-    st.session_state["var"] = 3
+    lati = st.session_state["lati"]
+    long = st.session_state["long"]
+    if (st.session_state["lati"] != PARAM_DEFAULTS["lati"]
+            or st.session_state["long"] != PARAM_DEFAULTS["long"]):
+        get_NDVI(lati, long, st.session_state["dist"])
+        if st.session_state.get("ndvi") is None:
+            st.session_state["ndvi"] = np.load("Default_ndvi_data.npy")
+    else:
+        st.session_state["ndvi"] = np.load("Default_ndvi_data.npy")
 
 
 if st.session_state.show_all:
